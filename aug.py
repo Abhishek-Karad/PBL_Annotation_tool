@@ -503,6 +503,9 @@ if current_image_name is None:
 image = load_image(current_image_name)
 width, height = image.size
 
+st.write("DEBUG IMAGE:", current_image_name)
+st.write("DEBUG SIZE:", image.size)
+st.image(image)
 activate_image(current_image_name, width, height)
 
 st.markdown(
