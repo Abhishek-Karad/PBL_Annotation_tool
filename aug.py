@@ -1,5 +1,7 @@
 import os
 import io
+from dotenv import load_dotenv
+from supabase import create_client, Client
 from collections import Counter
 from copy import deepcopy
 import xml.etree.ElementTree as ET
@@ -13,7 +15,23 @@ from streamlit_drawable_canvas import st_canvas
 # ------------------ CONFIG ------------------
 IMAGE_DIR = "images"
 ANNOTATION_DIR = "annotations"
+IMAGE_BUCKET = "images"
+ANNOTATION_BUCKET = "annotations"
 MIN_BOX_SIZE = 5
+
+# Supabase configuration.
+# Locally these values are read from .env.
+# On Streamlit Cloud, add the same keys under Settings -> Secrets.
+load_dotenv()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("SUPABASE_URL and SUPABASE_KEY must be configured.")
+    st.stop()
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 LABELS = ["RBC", "WBC", "Platelets"]
 
@@ -23,7 +41,6 @@ LABEL_COLORS = {
     "Platelets": "#7ED321",
 }
 
-os.makedirs(ANNOTATION_DIR, exist_ok=True)
 
 
 # ------------------ SESSION STATE ------------------
@@ -48,14 +65,17 @@ def initialize_session_state() -> None:
 
 # ------------------ IMAGE HELPERS ------------------
 def get_image_files() -> list[str]:
-    if not os.path.isdir(IMAGE_DIR):
+    try:
+        files = supabase.storage.from_(IMAGE_BUCKET).list()
+    except Exception:
         return []
 
+    image_extensions = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
     return sorted(
         [
-            file_name
-            for file_name in os.listdir(IMAGE_DIR)
-            if file_name.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"))
+            item["name"]
+            for item in files
+            if item.get("name", "").lower().endswith(image_extensions)
         ]
     )
 
@@ -65,19 +85,22 @@ def get_unannotated_images() -> list[str]:
     unannotated = []
     for image_name in images:
         xml_name = os.path.splitext(image_name)[0] + ".xml"
-        if not os.path.exists(os.path.join(ANNOTATION_DIR, xml_name)):
+        try:
+            supabase.storage.from_(ANNOTATION_BUCKET).download(xml_name)
+        except Exception:
             unannotated.append(image_name)
     return unannotated
 
 
 def load_annotations_from_xml(image_name: str, image_width: int, image_height: int) -> list[dict]:
-    xml_path = os.path.join(ANNOTATION_DIR, os.path.splitext(image_name)[0] + ".xml")
-    if not os.path.exists(xml_path):
-        return []
+    xml_name = os.path.splitext(image_name)[0] + ".xml"
 
     try:
-        tree = ET.parse(xml_path)
+        xml_bytes = supabase.storage.from_(ANNOTATION_BUCKET).download(xml_name)
+        tree = ET.ElementTree(ET.fromstring(xml_bytes))
     except ET.ParseError:
+        return []
+    except Exception:
         return []
 
     loaded_annotations: list[dict] = []
@@ -114,9 +137,7 @@ def get_current_image_name(images: list[str]) -> str | None:
 
 
 def load_image(image_name: str) -> Image.Image:
-    image_path = os.path.join(IMAGE_DIR, image_name)
-    with open(image_path, "rb") as file_handle:
-        image_bytes = file_handle.read()
+    image_bytes = supabase.storage.from_(IMAGE_BUCKET).download(image_name)
 
     with Image.open(io.BytesIO(image_bytes)) as image:
         return image.convert("RGB").copy()
@@ -343,10 +364,17 @@ def save_pascal_voc(image_name: str, image_width: int, image_height: int, annota
         return False, "Please annotate at least one valid bounding box before saving."
 
     root = build_pascal_voc_xml(image_name, image_width, image_height, valid_annotations)
-    xml_path = os.path.join(ANNOTATION_DIR, os.path.splitext(image_name)[0] + ".xml")
+    xml_content = prettify_xml(root).encode("utf-8")
+    xml_name = os.path.splitext(image_name)[0] + ".xml"
 
-    with open(xml_path, "w", encoding="utf-8") as file_handle:
-        file_handle.write(prettify_xml(root))
+    try:
+        supabase.storage.from_(ANNOTATION_BUCKET).upload(
+            xml_name,
+            xml_content,
+            {"content-type": "application/xml", "upsert": "true"},
+        )
+    except Exception as exc:
+        return False, f"Failed to save annotation: {exc}"
 
     return True, f"Annotation saved for {image_name}"
 
