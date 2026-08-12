@@ -1,5 +1,5 @@
 streamlit==1.40.0
-git+https://github.com/bowespublishing/streamlit-drawable-canvas.git
+streamlit-drawable-canvas==0.9.3
 Pillow
 supabase
 python-dotenv
